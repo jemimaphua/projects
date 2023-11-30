@@ -1,0 +1,83 @@
+---
+title: "1000 Most Common Danish Words"
+author: "Jemima"
+date: "2023-11-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Gather Most Common Words
+
+First, I am gathering the 1,000 most common Danish words. I chose this website to scrape from: <https://1000mostcommonwords.com/1000-most-common-danish-words/>
+
+```{r echo = FALSE}
+library(rvest)
+library(dplyr)
+
+link = "https://1000mostcommonwords.com/1000-most-common-danish-words/"
+page = read_html(link)
+
+    
+Danish = page %>% html_nodes("tr+ tr td:nth-child(2)") %>% html_text()
+# need to use html_nodes with a s
+    
+English = page %>% html_nodes("tr+ tr td~ td+ td") %>% html_text()
+# html_node(webpage, css = 'selector')
+
+Tusind_Ord <- data.frame(Danish, English)
+
+Tusind_Ord %>% mutate(Number = row_number())
+
+```
+
+## Flash Cards
+
+### Quiz Mode
+
+Next, I will make a simple program that will flash each Danish word and prompt for its English translation. The program ends when I get something wrong.
+
+```{r}
+x = readline(prompt = "enter xth common words you want to play: ")
+score = 0
+
+while (TRUE) {
+  n = sample(1:x, 1, replace = F)
+  print(Tusind_Ord$Danish[n])
+  answer = readline(prompt = "English meaning: ")
+  if(answer == Tusind_Ord$English[n]){
+    print("Correct")
+    score = score + 1
+  }
+  else{
+    print(paste0("Wrong, it is ", Tusind_Ord$English[n]))
+    print(paste0("You got ", score, " words right."))
+    break
+  }
+}
+```
+
+### Revision mode
+
+The program will flash a Danish word. Upon command, the English word will be flashed after.
+
+```{r}
+
+while (n>0) {
+  n = sample(1:1000, 1, replace = F)b
+  print(Tusind_Ord$Danish[n])
+  input = readline(prompt = "Press enter to flash the English Word (else press esc): ")
+  if(input == ""){
+    print(Tusind_Ord$English[n])
+    second_input = readline(prompt = "Press enter to flash the next Word (else press esc): ")
+      if(second_input != "" ){
+        break
+      }
+  }
+  else{
+    break
+  }
+}
+```

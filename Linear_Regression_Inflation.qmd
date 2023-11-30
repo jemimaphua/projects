@@ -1,0 +1,113 @@
+---
+title: "Linear_Regression_Inflation"
+format: html
+editor: visual
+---
+
+### 1. Loading the Data Set
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(dotwhisker)
+Data <- read.delim2("Inflation2017-2023.txt")
+
+```
+
+### 1.1. Renaming Columns for Readability
+
+```{r}
+newNames <- c("CPI.Total", "Food", "Housing", "Health", "Transport", "Communication", "Recreation", "Education", "Restaurants", "Misc", "Goods", "Services", "Core.Inflation.Index", "Overall.CPI.Excl.energy") 
+colnames(Data)[5:18] <- newNames
+```
+
+### 1.2. Examining The Data
+
+```{r}
+head(Data, n=3)
+```
+
+### 1.3. Structure Of The Data
+
+```{r}
+str(Data)
+```
+
+### 2.1 Line Plot to Visualize the Trend in Inflation Rates.
+
+```{r}
+Data$Group <- 1 #Added this because data did not automatically group together
+Data$CPI.Total <- as.numeric(Data$CPI.Total)
+
+# getting only the first month of the year to label the axis and prevent overcrowding
+custom_breaks <- grep("M01$", Data$Time_code, value = TRUE) 
+custom_labels <- c("2017", "2018","2019","2020", "2021", "2022", "2023")
+
+ggplot(Data, aes(x= Time_code, group = Group)) + 
+  geom_line(aes(y = CPI.Total), color = 'blue') + 
+  geom_line(aes(y = Core.Inflation.Index), color = 'red')+
+  geom_line(aes(y = Overall.CPI.Excl.energy), color = 'green') +
+  labs(title = "Inflation Rates Trend", y = "CPI Value", x = "Year") +
+  scale_x_discrete(breaks = custom_breaks, labels = custom_labels)  # customising the x axis labels
+
+```
+
+### 2.2 Boxplot to Visualize Inflation for Each Year
+
+```{r}
+Data$Year <- factor(Data$Year) # convert year to categorical variable first
+
+ggplot(Data, aes(x= Year, y= CPI.Total, group = Year, fill = Year))+
+  geom_boxplot()
+```
+
+### 2.3 Histogram to Visualize the Distribution of Inflation Rates.
+
+```{r}
+ggplot(Data, aes(x= CPI.Total))+
+  geom_histogram(bins = 10)
+```
+
+### 3.1 Linear Model - core inflation index as a function of year, month and perhaps other variables.
+
+```{r}
+Core_pred <- lm(Core.Inflation.Index ~ Year + Time_unit + Month, data = Data)
+summary(Core_pred)
+```
+
+### 3.2 Visualization of the Model Output Using Dotwhiskers
+
+```{r}
+dwplot(Core_pred, dot_args = list(size = 3)) + ggtitle("Dot & Whisker Plot for a Linear Model")
+```
+
+### 3.3 Reflection on the Model
+
+#### Time_unit crowding out month?
+
+Time_unit and month appear to be the same variable, could they be crowding out the effects of each other? To check this, I will create another linear model without Time_unit.
+
+```{r}
+Core_pred_2 <- lm(Core.Inflation.Index ~ Year + Month, data = Data)
+summary(Core_pred_2)
+```
+
+Using stargazer to compare the two model outputs.
+
+```{r warning=FALSE}
+library(stargazer)
+stargazer(Core_pred, Core_pred_2, type = "text", title = "Model Comparison")
+```
+
+It appears that the inclusion of time_unit makes no difference to the adjusted R\^2 of the model. However, the exclusion of time_unit increases the significance of both the Year and Month variables. Hence it would be better to exclude time_unit.
+
+#### Including other variables
+
+Including other data such as changes in exchange rates, wages, and productivity levels of the country will improve the model.
+
+Changes in exchange rates will affect the price of imported goods. If the country's exchange rate weakens against other countries, price of imported goods increases, leading to inflation. Vice verse when the exchange rate strengthens.
+
+Higher wages results in higher spending power. When there is higher spending activity, prices increase in response. Businesses also raise prices to pay higher wages.
+
+When productivity increases, businesses can produce more goods and services with the same or fewer resources. This efficiency often leads to lower production costs. Lower costs can translate into lower prices for consumers if businesses decide to pass on the savings. In this scenario, increased productivity can contribute to lower inflation.

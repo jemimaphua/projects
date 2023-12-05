@@ -1,8 +1,11 @@
 # r_projects
 This repository stores all my projects done using R.
 
+### Classification_Money_Laundering.rmd
+An assignment from my data analysis class that flags out money laundering cases using classification models like logistic regression and random forest. Note to self: to tune the models
+
 ### Linear_Regression_Inflation.qmd
-An assignment from my data analysis class that uses linear regression to model inflation rates.
+Another assignment from my data analysis class that uses linear regression to model inflation rates.
 
 ### Randforest_taxi_fares.r
 This project was taken from DataCamp to learn how to use regression trees and random forest to predict taxi fares in NYC

@@ -1,0 +1,192 @@
+---
+title: "Classification_Money_Laundering"
+author: "Jemima"
+date: "2023-11-21"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Data
+
+#### 1.1 Loading in library and the two datasets into R. Inspect their structures.
+
+```{r warning=FALSE}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(rsample)
+library(dplyr)
+library(parsnip)
+library(ranger)
+library(dotwhisker)
+library(broom)
+library(caret) 
+library(yardstick)
+
+alertdata <- read_csv("synth_alerts.csv")
+transdata <- read_csv("synth_trans.csv")
+
+head(alertdata, 3)
+head(transdata, 3)
+
+```
+
+#### 1.2 Merging the two datasets based on AlertID.
+
+```{r}
+data <- left_join(transdata, alertdata, by = "AlertID")
+data$Outcome = as.factor(data$Outcome)
+```
+
+#### 1.3 Money laundering rate.
+
+```{r}
+# money laundering rate is number of reports/total number of reports and dismiss
+nrow(filter(data, Outcome == 'Report'))/nrow(data)
+```
+
+#### 1.4 Total and avaerage transactions
+
+```{r}
+sum(data$n_trans)
+sum(data$n_trans)/nrow(data) # number of transactions made per alert ID
+```
+
+## 2. Visualization
+
+#### 2.1 Histogram to visualize the distribution of number of transactions.
+
+```{r}
+# histogram
+ggplot(data, aes(x=n_trans )) + geom_histogram(bins = 20) +
+  labs(title = "Transaction Distribution", y = "Count", x = "Number of Transactions in a Day")
+
+```
+
+#### 2.2 Histogram to illustrate the distribution of net transaction amount.
+
+```{r}
+ggplot(data, aes(x=sum_trans )) + geom_histogram(bins = 20) + labs(title = "Net Transaction Amount Distribution", y = "Count", x = "Net Transactions Amount in a Day")
+```
+
+## 3. Modelling
+
+I will create two models, random forest and logistic regression, to flag potential money laundering cases.
+
+#### 3.1 Splitting data into training and test.
+
+```{r}
+splits <- initial_split(data, strata = Outcome)
+
+data_train <- training(splits)
+data_test <- testing(splits)
+```
+
+#### 3.2 Logistic Regression Model
+
+```{r}
+# create empty model
+lmodel <- logistic_reg() %>%
+  set_engine('glm') %>%
+  set_mode("classification")
+
+
+# fit data over model
+lfit <- fit(lmodel, data = data_train, Outcome ~ -AlertID)
+```
+
+#### 3.3 Random Forest Model
+
+```{r}
+# create empty model
+rfmodel <- rand_forest(mode = "classification")
+
+# fit data over model
+rffit <- fit(rfmodel, data = data_train, Outcome ~ -AlertID)
+```
+
+#### 3.4 Visualize the model output.
+
+```{r}
+# adding both predictions on training data
+data_train_fit = augment(lfit, data_test)
+colnames(data_train_fit)[1:3] = gsub('\\.', 'log_reg_', colnames(data_train_fit)[1:3] )
+
+data_train_fit = augment(rffit, data_train_fit)
+colnames(data_train_fit)[1:3] = gsub('\\.', 'rand_for_', colnames(data_train_fit)[1:3] )
+
+# visualise output using confusion matrix
+# logistic regression first
+caret::confusionMatrix(data_train_fit$log_reg_pred_class, data_train_fit$Outcome)
+# Random forest
+caret::confusionMatrix(data_train_fit$rand_for_pred_class, data_train_fit$Outcome)
+```
+
+#### 3.5 Evaluation of the model output using confusion matrix metrics (Accuracy, AUC, etc). 
+
+From the confusion matrices above, accuracy of the logistic regression model is 0.8282 and that of the random forest model is 0.7652.
+
+Accuracy is calculated by (TP + TN)/(TP + TN + FP + FN) (model evaluation slides). For a balanced data set, accuracy is a good measure of how good the model is. However the data I have here is not balanced, (Report/ Report+ Dismiss) is 0.17175 as seen from 1.3. Hence the high accuracy here could just be because there are so few reports. In fact, the logistic regression model fails to predict any True Reports as Reports, and the random forest model predicts only 70 True Reports as Reports.
+
+Precision is TP/(TP+FN) (model evaluation slides).
+
+```{r}
+# precision for logistic regression model
+caret::precision(data_train_fit$Outcome, data_train_fit$log_reg_pred_class)
+
+# precision for random forest model
+caret::precision(data_train_fit$Outcome, data_train_fit$rand_for_pred_class)
+```
+
+Again, both models appear to perform precisely. The logistic regression model returns a precision of 1 and the random forest model returns a prediction of 0.907. Precision useful if it is important to know that all true dismiss are detected. It is usually better to be safe than sorry, hence it might not do harm to cover more ground. Thus, it might not be so important for precision to be high as it is okay to wrongly predict dismiss situations as report situations
+
+Next is finding out the sensitivity and specificity of my models.
+
+```{r}
+# Sensitivity first
+# logistic regression model
+caret::sensitivity(data_train_fit$Outcome, data_train_fit$log_reg_pred_class)
+
+# random forest model
+caret::sensitivity(data_train_fit$Outcome, data_train_fit$rand_for_pred_class)
+```
+
+Sensitivity is calculated by TP/(TP + FP). In this case it would be True dismiss/ (True dismiss + False dismiss). We would want this to be as close to 1 as possible, and is an important metric as we do not want to falsely dismiss when it is a report situation. However, the number appears high only because the data is unbalanced, as in actuality both models wrongly dismiss a high number of reports.
+
+```{r}
+# Next, specificity
+# logistic regression model
+caret::specificity(data_train_fit$Outcome, data_train_fit$log_reg_pred_class)
+
+# random forest model
+caret::specificity(data_train_fit$Outcome, data_train_fit$rand_for_pred_class)
+```
+
+Specificity is TN/(FP+TN), which is True Reports / (False Dismiss + True Reports). It measures if all true reports are predicted as reports, and this is the most important metric. Evidently, both models do extremely badly here, but the random forest model is slightly better.
+
+```{r}
+# getting AUC of both models
+roc_auc(data_train_fit, Outcome, rand_for_pred_Report)
+roc_auc(data_train_fit, Outcome, log_reg_pred_Report)
+
+# visualising ROC curve
+autoplot(roc_curve(data_train_fit, Outcome, rand_for_pred_Report))
+autoplot(roc_curve(data_train_fit, Outcome, log_reg_pred_Report))
+```
+
+The AUC of both models is around 0.5 but we want it as close to 1 as possible. The ROC curve for both models once again show that my models are bad.
+
+## 4. Reflection on the Models
+
+#### 4.1 How could they be improved + trade-offs. 
+
+Perhaps the random forest model can be tuned with a higher mtry or ntree. However, a higher mtry could result in over fitting where the model fits perfectly on training data but not as well on real data. The model learns the training data too well and fails to generalize to new or unseen data. Increasing ntrees might also improve the performance of the random forest model, but comes with the trade off of model efficiency.
+
+Cross-validation will help overcome the problem of over fitting if the model is tuned to fit more closely.
+
+Some data preprocessing and scaling could help improve the logistic regression model. In my data, many variables are currently on different scales, such as debit_share, n_trans, and sum_trans. This could be result in some variables dominating others and thus decrease the model performance. I can also do an exploratory data analysis and check for any relationship between my variables, as logistic regression assumes independence among variables.

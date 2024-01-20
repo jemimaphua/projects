@@ -1,0 +1,741 @@
+---
+title: "Final Report"
+author: "Jemima"
+date: "2023-11-22"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Inspection & Cleaning
+
+*Data Filtering, Transformation and Combination. Check for outliers, missing values, or duplicates.*
+
+Loading in all packages needed:
+
+```{r warning=FALSE, message=FALSE}
+library(geosphere)
+library(stringr)
+library(dplyr)
+library(tidyverse)
+library(rsample)
+library(parsnip)
+library(ggplot2)
+library(scales)
+library(Metrics)
+library(ggcorrplot)
+library(tidyr)
+library(caret)
+library(ranger)
+```
+
+Reading in the data:
+
+```{r}
+
+# Resale prices of HDB:
+Mar2012toDec2014 <- read.csv("ResaleFlatPricesBasedonRegistrationDateFromMar2012toDec2014.csv")
+Jan2015toDec2016 <- read.csv("ResaleFlatPricesBasedonRegistrationDateFromJan2015toDec2016.csv")
+Jan2017toNov2023 <- read.csv("ResaleflatpricesbasedonregistrationdatefromJan2017onwards.csv")
+
+# Latitude and longitude data:
+SgZipCodes <- read.csv("sg_zipcode_mapper.csv")
+
+# Primary school data:
+PrimarySchSg <- read.csv("primaryschoolsg.csv")
+
+# Mrt data:
+MrtSg <- read.csv("mrtsg.csv")
+
+```
+
+Inspection of data:
+
+```{r}
+head(Jan2015toDec2016, 3)
+head(Jan2017toNov2023, 3)
+head(Mar2012toDec2014, 3)
+
+head(MrtSg, 3)
+head(PrimarySchSg, 3)
+head(SgZipCodes, 3)
+```
+
+I noticed that the resale HDB data across the years is not standardized. For one, the data from March 2012 to December 2014 does not have a remaining_lease column. The data from January 2017 5o November 2023 has a remaining_lease column in terms of years and months, but that of January 2015 to December 2016 is in terms of years only. Hence some standardization is needed here, and I chose to keep the remaining_lease column but in terms of years only, as it is difficult to find in terms of months since we only know the year of lease commencement.
+
+Standardization across years:
+
+```{r}
+Mar2012toDec2014 <- Mar2012toDec2014 %>% mutate(sale_year = as.numeric(str_extract(Mar2012toDec2014$month, "^.{4}"))) %>% 
+  mutate(remaining_lease = 99 - (sale_year - lease_commence_date)) %>% select(-sale_year)
+
+Jan2017toNov2023 <- Jan2017toNov2023 %>% mutate(sale_year = as.numeric(str_extract(Jan2017toNov2023$month, "^.{4}"))) %>% 
+  mutate(remaining_lease = 99 - (sale_year - lease_commence_date)) %>% select(-sale_year)
+```
+
+Combining the different years data into one data frame for wrangling:
+
+```{r}
+FullHdbData <- rbind(Mar2012toDec2014, Jan2015toDec2016, Jan2015toDec2016)
+```
+
+I noticed that there is differences in the formatting of the address column between the HDB data and the Zip Code data. The HDB data shortens various words like 'BLOCK' to 'BLK' and 'ROAD' to 'RD'. Hence I will shorten the address column in the Zip Code data since the HDB data is much larger in size.
+
+```{r}
+full_name = c('ROAD', 'AVENUE', 'STREET', 'CRESCENT', 'CENTRAL', 'PLACE', 'BUKIT', 'DRIVE', 'NORTH', 'GARDENS', 'CLOSE', 'LORONG', 'JALAN', 'COMMONWEALTH', 'SAINT', 'UPPER', 'SOUTH', 'NORTH', 'HEIGHTS', 'PARK', 'TERRACE', 'TANJONG', 'KAMPONG', 'MARKET')
+short_name= c('RD', 'AVE', 'ST', 'CRES', "CTRL", 'PL', 'BT', 'DR', 'NTH', 'GDNS', 'CL', 'LOR', 'JLN', 'C\'WEALTH', 'ST\\.', 'UPP', 'STH', 'NTH', 'HTS', 'PK' ,'TER', 'TG', 'KG', 'MKT')
+Replace_list <- data.frame( full_name, short_name)
+
+for (i in 1:nrow(Replace_list)) {
+  SgZipCodes$road_name <- str_replace_all(SgZipCodes$road_name, Replace_list[i,1], Replace_list[i,2])
+}
+
+SgZipCodes = SgZipCodes %>% mutate(address = paste0(blk_no, " ", road_name)) %>%
+  select(-searchval, -postal, -building, -blk_no, -road_name) %>%
+  distinct()
+```
+
+Since I have too much data, and I'm limited by the CPU of my laptop, I will sample about 25,000 observations from my full HDB data set to train and test.
+
+```{r}
+# randomly select 25k to use.  
+set.seed(123)
+WorkingData = sample_n(FullHdbData, 25000)
+
+# adding a col 'address' to join data frames later
+WorkingData <- mutate(WorkingData, address = paste0(block, " ", street_name))
+```
+
+Now I will assign the latitude and longitude coordinates to each of my HDB observations in my Working Data from my Zip Code data.
+
+```{r warning=FALSE}
+# joining SgZipCodes to HDB data and removing missing data or duplicates
+WorkingData = WorkingData %>% left_join(SgZipCodes, by = c("address"="address")) %>% na.omit() %>% distinct()
+```
+
+## Feature Engineering
+
+*Create new features or transforming existing ones to improve model performance. Double check data again for missing/ weird values.*
+
+I'm adding additional variables such as what facilities are nearby to my current Working Data. To do this, I will first create a max latitude function to find the maximum latitude given a distance from a point.
+
+```{r}
+radius = 6378 # around the equator (singapore is on the equator)
+
+max_lat = NULL
+distance_btwn = NULL
+
+max_lat_fun = function(lat1){
+  return(2* sin(1/radius)+lat1)
+}
+```
+
+I want to match primary schools under 2km of distance to each HDB listing in the Working Data. First I will sort both data frames by latitude.
+
+```{r}
+WorkingData = WorkingData %>% arrange(latitude)
+PrimarySchSg = PrimarySchSg %>% arrange(Latitude)
+
+# adding empty column first
+WorkingData$schools_within_2km = NA
+```
+
+Next, I will use a loop to match all primary schools under the 2km distance from each HDB listing.
+
+```{r}
+# LOOP 1. took 7 minutes to run this loop
+for (i in 1:nrow(WorkingData)) {
+  max_lat = max_lat_fun(WorkingData[i,13])
+  
+  for (x in 1:nrow(PrimarySchSg)) {
+    
+    if (PrimarySchSg[x,7] < max_lat) {
+      
+      distance_btwn = distHaversine(c(WorkingData[i, 14], WorkingData[i,13]), c(PrimarySchSg[x,8], PrimarySchSg[x,7]))
+      
+      if (distance_btwn < 2000) {
+        
+        if (is.na(WorkingData[i, 16])) {
+          WorkingData[i,16] = PrimarySchSg[x, 1]
+        } 
+        
+        else if (WorkingData[i,16] != PrimarySchSg[x, 1]) {
+          WorkingData[i,16] = paste0(WorkingData[i, 16], ', ', PrimarySchSg[x, 1])
+        }
+      }
+    }
+  }
+}
+```
+
+I also want to match all the MRT stations within walking distance, which I consider to be at most 15 minutes of walking. That is approximately 1km for an average walking speed.
+
+```{r}
+# arranging MRT data set by latitude and adding empty column
+MrtSg = MrtSg %>% arrange(Latitude)
+WorkingData$mrt_within_1km = NA
+
+# loop to match
+for (i in 1:nrow(WorkingData)) {
+  max_lat = max_lat_fun(WorkingData[i,13])
+  
+  for (x in 1:nrow(MrtSg)) {
+    
+    if (MrtSg[x, 6] < max_lat) {
+      
+      distance_btwn = distHaversine(c(WorkingData[i, 14], WorkingData[i,13]), c(MrtSg[x,7], MrtSg[x,6]))
+      
+      if (distance_btwn < 1000) {
+        
+        if (is.na(WorkingData[i, 17])) {
+          WorkingData[i,17] = MrtSg[x, 2]
+        } 
+        
+        else if (WorkingData[i,17] != MrtSg[x, 2]) {
+          WorkingData[i,17] = paste0(WorkingData[i, 17], ', ', MrtSg[x, 2])
+        }
+      }
+    }
+  }
+}
+```
+
+## Tidy Data
+
+Now I need to further clean up my data. It is not tidy now as some cells have more than one value.
+
+```{r}
+school.split = str_split(WorkingData$schools_within_2km, ",", simplify = T)
+
+WorkingData = cbind(WorkingData, school.split)
+
+# rename columns
+for (i in 1:ncol(school.split)) {
+  colnames(WorkingData)[17+i] <- paste0('schools_within_2km_', i) 
+}
+
+# doing the same for MRT
+mrt.split = str_split(WorkingData$mrt_within_1km, ",", simplify = T)
+WorkingData = cbind(WorkingData, mrt.split)
+
+for (i in 1:ncol(mrt.split)) {
+  colnames(WorkingData)[29+i] <- paste0('MRT_within_1km_', i) 
+}
+
+# remove original column
+WorkingData = select(WorkingData, -schools_within_2km, -mrt_within_1km)
+
+# fill empty with NA
+WorkingData[WorkingData == ""] = NA
+
+# export cleaned data as csv so that I don't have to repeatedly run the loops above
+write.csv(WorkingData, file = "Cleaned_Data_Tidy.csv")
+```
+
+some more data pre-processing...
+
+```{r}
+Cleaned_Data_Tidy <- read.csv("Cleaned_Data_Tidy.csv")
+
+# changing the facilities nearby to a count variable
+Cleaned_Data_Tidy = Cleaned_Data_Tidy %>% 
+  mutate(Schools_Count = rowSums(!is.na(Cleaned_Data_Tidy[17:28]))) %>%
+  mutate(MRT_Count = rowSums(!is.na(Cleaned_Data_Tidy[29:37])))
+
+# removing the columes
+Cleaned_Data_Tidy = Cleaned_Data_Tidy[, -(17:28)]
+Cleaned_Data_Tidy = Cleaned_Data_Tidy[, -(17:25)]
+```
+
+## Explorative Data Analysis
+
+Normality of value we will predict
+
+```{r}
+ggplot(Cleaned_Data_Tidy) +
+  aes(x = resale_price) +
+  geom_histogram(bins = 30L, fill = "#7C2456") +
+  scale_y_continuous(labels = label_number()) +
+  labs(title = 'Resale Prices Distribution', y = "Count", x ='Resale Prices')
+
+  
+```
+
+### Violin plots to visualize different variables
+
+House prices by town
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = town))+
+  geom_violin(aes(y = resale_price), color = "#7C2456", fill = "#FFE0EF")+
+  labs(title = 'Resale Prices by Town', y = " Resale Price", x ='Town') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+House prices by flat type
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = flat_type))+
+  geom_violin(aes(y = resale_price), color = "#7C2456", fill = "#FFE0EF")+
+  labs(title = 'Resale Prices by Flat Type', y = " Resale Price", x ='Flat Type') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+House prices by storey range
+
+```{r warning = F}
+ggplot(Cleaned_Data_Tidy, aes(x = storey_range))+
+  geom_violin(aes(y = resale_price), color = "#7C2456", fill = "#FFE0EF")+
+  labs(title = 'Resale Prices by Storey Range', y = " Resale Price", x ='Storey Range') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+### Other plots to visualize different variables
+
+House prices by remaining lease left
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = remaining_lease))+
+  geom_jitter(aes(y = resale_price), shape = 1, color = "#7C2456")+
+  labs(title = 'Resale Prices by Remaining lease', y = " Resale Price", x ='Remaining lease left') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+House prices by size
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = floor_area_sqm))+
+  geom_point(aes(y = resale_price), shape = 1, color = "#7C2456")+
+  labs(title = 'Resale Prices by Size', y = " Resale Price", x ='Floor Area Sqm') +
+  scale_y_continuous(labels = label_number())
+```
+
+House prices by number of schools nearby
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = Schools_Count))+
+  geom_jitter(aes(y = resale_price), shape = 1, color = "#7C2456")+
+  labs(title = 'Resale Prices by School Count', y = " Resale Price", x ='Number of Schools within 2km') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+House prices by MRT stations nearby
+
+```{r}
+ggplot(Cleaned_Data_Tidy, aes(x = MRT_Count))+
+  geom_jitter(aes(y = resale_price), shape = 1, color = "#7C2456")+
+  labs(title = 'Resale Prices by MRT Stations Count', y = " Resale Price", x ='Number of MRT stations within 1km') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+Storey Range by Town
+
+```{r}
+ggplot(Cleaned_Data_Tidy) +
+  aes(x = town, y = storey_range) +
+  geom_point(colour = "#7C2456") +
+  theme_minimal()+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  labs(title = "Storey Range in Different Towns", x = "Town", y = "Storey Range")
+```
+
+## Split Data into Test & Training
+
+```{r}
+# split training and test data
+set.seed(123)
+
+data_split = rsample::initial_split(Cleaned_Data_Tidy, prop=0.75,strata = "resale_price")
+
+# extract the traning set
+data_train = training(data_split)
+
+# extract the traning set
+data_test = testing(data_split)
+
+nrow(data_train)/nrow(Cleaned_Data_Tidy) # should be close to 0.75
+```
+
+## Create Empty Models
+
+Linear regression and random forest will be used.
+
+```{r}
+# empty linear regression model
+Lin_reg_model <- linear_reg()
+
+# empty random forest model
+Rand_for_model = rand_forest(mode = 'regression') %>% set_engine("ranger", importance = 'permutation') # permutation as i have both catergorical and continuous variables
+```
+
+## Fit Data onto Models
+
+```{r}
+# fit linear regression using the fit_xy function from parsnip
+Lin_reg_fit = fit_xy(Lin_reg_model,
+                     #Extract a single column
+                     y=dplyr::pull(data_train, resale_price),
+                     x= dplyr::select(data_train, month, town, flat_type, block, street_name, storey_range, floor_area_sqm, flat_model, lease_commence_date, remaining_lease, Schools_Count, MRT_Count))
+
+# fit random forest using the fit_xy function from parsnip
+Rand_for_fit = fit_xy(Rand_for_model,
+                     #Extract a single column
+                     y=dplyr::pull(data_train, resale_price),
+                     x= dplyr::select(data_train, month, town, flat_type, block, street_name, storey_range, floor_area_sqm, flat_model, lease_commence_date, remaining_lease, Schools_Count, MRT_Count))
+```
+
+## Visualize & Evaluate Models Output
+
+*Assess model performance using evaluation metrics (accuracy, precision, recall, RMSE, etc.). May use cross-validation.*
+
+```{r}
+summary(Lin_reg_fit$fit)
+Rand_for_fit
+```
+
+For the linear regression model, r\^2 and adjusted r\^2 seem good, 0.9478 and 0.9387 respectively. For the random forest, r squared (OOB) is 0.9323342.
+
+RSS is the residual Sum of Squares, and it explains variation NOT attributable to the relationship between X and Y. Smaller means the model is better at explaining the relationship.
+
+The OOB score is an estimate of the model's performance on unseen data, somewhat akin to a cross-validation score. It indicates how well the model generalizes to new, unseen data without the need for a separate validation set and is not directly comparable with the linear model's r\^2.
+
+### RSME/MSE:
+
+```{r}
+
+# rmse of linear regression model
+Metrics::rmse(Lin_reg_fit$fit$fitted.values, data_train$resale_price)
+
+# rmse of random forest model
+sqrt(Rand_for_fit$fit$prediction.error)
+```
+
+Now I will fit the model results over training data to visualize the results further.
+
+```{r}
+# fitting linear regression results
+data_train$pred_price = Lin_reg_fit$fit$fitted.values
+
+# fitting random forest results
+data_train$pred_price_rf = Rand_for_fit$fit$predictions
+```
+
+Further visualization of the linear model output.
+
+### Actual vs predicted prices plot:
+
+```{r}
+ggplot(data_train, aes(pred_price, resale_price, color = flat_type))+
+  geom_point(aes(alpha = 0.2)) + 
+  labs(title = 'Actual vs Predicted Price (Linear Regression Model)', y = "Actual Resale Price", x = 'Predicted Resale Price') +
+  scale_y_continuous(labels = label_number())+
+  scale_x_continuous(labels = label_number())+
+  geom_abline(intercept = 0, slope = 1, color = "#7C2456", linetype = "dashed")
+```
+
+### Distribution of residuals:
+
+```{r}
+hist(Lin_reg_fit$fit$residuals, main ="Histogram of Residuals", xlab = "Residuals")
+```
+
+Residuals appear to be normally distributed. Using a qqplot to check more precisely.
+
+```{r}
+qqnorm(Lin_reg_fit$fit$residuals)
+qqline(Lin_reg_fit$fit$residuals)
+```
+
+Residuals are kinda normal except for extreme ends.
+
+### Residual vs actual price plot:
+
+```{r}
+ggplot(data_train, aes(y = resale_price, x= resale_price-pred_price))+
+  geom_point(colour = "#7C2456")+ 
+  labs(title = 'Residuals', y = "Actual Resale Price", x = 'Residual')+
+  scale_y_continuous(labels = label_number())+
+  scale_x_continuous(labels = label_number())
+```
+
+Higher prices are not captured as accurately.
+
+### Residual vs fitted price plot:
+
+```{r}
+ggplot(data_train, aes(x = pred_price, y= resale_price-pred_price))+
+  geom_point(colour = "#7C2456")+ 
+  labs(title = 'Residuals', x = "Predicted Price", y = 'Residual')+
+  scale_y_continuous(labels = label_number())+
+  scale_x_continuous(labels = label_number())+
+  stat_smooth(method = "lm", level = 0.90)
+```
+
+Residuals don't appear to have homoscedasticity. There is no discernible linearity, which shows that the variability of the residuals is consistent throughout the range of predicted values.
+
+### Multicollinearity:
+
+```{r}
+numeric_variables = select(data_train, floor_area_sqm, lease_commence_date, remaining_lease, Schools_Count, MRT_Count)
+corr_matrix = round(cor(numeric_variables), 2)
+
+# Compute and show the  result
+ggcorrplot(corr_matrix, hc.order = TRUE, type = "lower", lab = TRUE)+
+  scale_fill_gradient(low = "#FFE0EF", high = "#7C2456")
+  
+
+```
+
+I will try removing the lease_commencement_date.
+
+Now for further visualization of the random forest model output.
+
+### Actual vs predicted price plot (Random Forest):
+
+```{r}
+ggplot(data_train, aes(pred_price_rf, resale_price, color = flat_type))+
+  geom_point(aes(alpha = 0.2)) + 
+  labs(title = 'Actual vs Predicted Price (Random Forest Model)', y = "Actual Resale Price", x = 'Predicted Resale Price')+
+  scale_y_continuous(labels = label_number())+
+  scale_x_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  geom_abline(intercept = 0, slope = 1, color = "#7C2456", linetype = "dashed")
+```
+
+### Importance of variables:
+
+```{r}
+Importance_Var = data.frame(importance = importance(Rand_for_fit$fit)) 
+Importance_Var$var = row.names(Importance_Var)
+
+ggplot(Importance_Var, aes(y = var, x = importance))+ 
+  geom_point(colour = "#7C2456")+
+  scale_x_continuous(labels = label_number())
+```
+
+It seems like the number of MRT stations and the month the house was sold for contribute the least to the model, but I will still include them.
+
+## Model Tuning
+
+### Linear Model Fit 2
+
+```{r}
+# to pick out numerical values first
+numerical_variables = select(data_train, floor_area_sqm, lease_commence_date, resale_price, remaining_lease, Schools_Count, MRT_Count)
+data_train_plot = gather(numerical_variables)
+
+
+ggplot(data_train_plot, aes(x = key, y = value, color = key)) +
+  geom_point(position = position_jitter(width = 0.2), size = 2) +
+  geom_boxplot(alpha = 0.5) +
+  theme_minimal() +
+  labs(x = "Variables", y = "Values", title = "Dot-and-Whisker Plot")
+```
+
+From the above visualization, concluded should standardize the scales of numerical values for linear model. Random forest not needed. insert why. apparently tree-based models do not need this
+
+```{r}
+# scaling all the numerical variables
+scaled_data_train <- data_train %>% mutate_if(is.numeric, scale)
+
+# fit the new training data again on linear regression model
+Lin_reg_fit2 = fit_xy(Lin_reg_model,
+                     #Extract a single column
+                     y=dplyr::pull(scaled_data_train, resale_price),
+                     x= dplyr::select(scaled_data_train, month, town, flat_type, block, street_name, storey_range, floor_area_sqm, flat_model, lease_commence_date, remaining_lease, Schools_Count, MRT_Count)
+)
+
+summary(Lin_reg_fit2$fit)
+anova_result = anova(Lin_reg_fit$fit, Lin_reg_fit2$fit)
+anova_result
+
+rmse_lr_2 = Metrics::rmse(Lin_reg_fit2$fit$fitted.values, scaled_data_train$resale_price)
+```
+
+RSS improved significantly. No p-value associated with F statistic as both models are not nested. But will take Model 2 as RSS improved.
+
+### Linear Model Fit 3
+
+Now model 3: without lease_commence_date variable.
+
+```{r}
+Lin_reg_fit3 = fit_xy(Lin_reg_model,
+                     #Extract a single column
+                     y=dplyr::pull(scaled_data_train, resale_price),
+                     x= dplyr::select(scaled_data_train, month, town, flat_type, block, street_name, storey_range, floor_area_sqm, flat_model, remaining_lease, Schools_Count, MRT_Count)
+)
+
+summary(Lin_reg_fit3$fit)
+anova_result = anova(Lin_reg_fit$fit, Lin_reg_fit2$fit, Lin_reg_fit3$fit)
+anova_result
+
+Metrics::rmse(Lin_reg_fit3$fit$fitted.values, scaled_data_train$resale_price)
+```
+
+RSS does not decrease much from model 2 to 3. Additionally the significance of the F statistics is low, hence there is no difference if I included lease_commencement_date. I will however choose model 3 since it is simpler (fewer variables).
+
+### Random Search: mtry
+
+Tuning for random forest. I will first determine the optimal mtry. I will test on a random forest object instead of a ranger object as I have trouble with the latter. I am setting the method as cross validation with 5 folds, and doing a random search instead of a grid search otherwise processing time is too long. Code credit: <https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/>
+
+```{r}
+library(randomForest)
+
+set.seed(123)
+control <- trainControl(method="cv", number=5, search="random")
+tunegrid <- expand.grid(.mtry=c(3:13))
+```
+
+I will take a subset of my training data. Otherwise it is IMPOSSIBLE to do anything with a large data set.
+
+```{r}
+set.seed(123)
+data_tune = sample_n(data_train, 3000)
+```
+
+Random search with mtry = 3 to 10 first:
+
+```{r}
+rf_gridsearch <- train(resale_price~month + town + flat_type + block + street_name + storey_range + floor_area_sqm + flat_model + lease_commence_date + remaining_lease + Schools_Count + MRT_Count, 
+                       data=data_tune, method="rf", tuneGrid=tunegrid, trControl=control)
+
+rf_gridsearch
+plot(rf_gridsearch)
+```
+
+Another with mtry = 8 to 15:
+
+```{r}
+tunegrid <- expand.grid(.mtry=c(10:15))
+
+rf_gridsearch2 <- train(resale_price~month + town + flat_type + block + street_name + storey_range + floor_area_sqm + flat_model + lease_commence_date + remaining_lease + Schools_Count + MRT_Count, 
+                       data=data_tune, method="rf", tuneGrid=tunegrid, trControl=control)
+
+rf_gridsearch2
+plot(rf_gridsearch2)
+```
+
+So far 15 give the smallest RMSE. But from the graph, the gradient starts to smooth out around 9 or 10. So I will stick to 10, otherwise the model will be too memory and time intensive.
+
+### Random Forest Fit 2
+
+Tuning my model to .mtry = 10:
+
+```{r}
+Rand_for_model2 = rand_forest(mode = "regression", mtry = 10) %>% set_engine("ranger", importance = 'permutation')
+
+Rand_for_fit2 = fit_xy(Rand_for_model2,
+                     #Extract a single column
+                     y=dplyr::pull(data_train, resale_price),
+                     x= dplyr::select(data_train, month, town, flat_type, block, street_name, storey_range, floor_area_sqm, flat_model, lease_commence_date, remaining_lease, Schools_Count, MRT_Count))
+
+Rand_for_fit2
+```
+
+Slight Improvement in OOB and MSE.
+
+### Random Forest Fit 3
+
+Next, I will try to assign weights to variables. Code credit: <https://stats.stackexchange.com/questions/36174/random-forest-what-if-i-know-a-variable-is-important>
+
+```{r}
+Importance_Var = mutate(Importance_Var, weights = importance/sum(importance))
+
+Rand_for_fit3= ranger(resale_price ~  month + town + flat_type + block + street_name + storey_range + floor_area_sqm + flat_model + lease_commence_date + remaining_lease + Schools_Count + MRT_Count, 
+                       data = data_train, 
+                       importance = "permutation", 
+                       split.select.weights = Importance_Var$weights, mtry = 10)
+
+
+Rand_for_fit3
+```
+
+Nice i guess that helped?? OOB improved, so less likely to overfit. it is 0.9416355 and MSE is 984,356,263 (1,139,184,324).
+
+## Deploy Chosen or Both Models on Test Data?
+
+For linear model, I'm going to use linear regression fit 3. For the random forest model, I will use random forest fit 3.
+
+```{r warning=F}
+
+# scaling for test set also
+scaled_data_test <- data_test %>% mutate_if(is.numeric, scale)
+
+Lin_reg_fit_test = fit_xy(Lin_reg_model,
+                     #Extract a single column
+                     y=dplyr::pull(scaled_data_test, resale_price),
+                     x= dplyr::select(scaled_data_test, month, town, flat_type,
+                                      block, street_name, storey_range,
+                                      floor_area_sqm, flat_model, remaining_lease,
+                                      Schools_Count, MRT_Count))
+
+Rand_for_fit_test= ranger(resale_price ~  month + town + flat_type + block + street_name + storey_range +
+                            floor_area_sqm + flat_model + lease_commence_date + remaining_lease + Schools_Count + 
+                            MRT_Count, 
+                          data = data_test, 
+                          importance = "permutation", 
+                          split.select.weights = Importance_Var$weights, 
+                          mtry = 10)
+
+```
+
+## Visualize & Evaluate
+
+Insert predicted prices into test data.
+
+I need to unstandardize the predicted price variable. Code credit: <https://stats.stackexchange.com/questions/209784/rescale-predictions-of-regression-model-fitted-on-scaled-predictors>
+
+```{r}
+# fitting linear regression unstandardized results
+data_test$unstandardised_predictions_lr = Lin_reg_fit_test$fit$fitted.values * sd(data_test$resale_price) + mean(data_test$resale_price)
+
+# fitting random forest results
+data_test$predictions_rf = Rand_for_fit_test$predictions
+```
+
+Results on test data:
+
+```{r}
+summary(Lin_reg_fit_test$fit)
+Rand_for_fit_test
+```
+
+### RSME of Test Data Output
+
+```{r}
+# rmse of linear regression model
+Metrics::rmse(data_test$unstandardised_predictions_lr, data_test$resale_price)
+
+# rmse of random forest model
+sqrt(Rand_for_fit_test$prediction.error)
+```
+
+Seems like the linear regression model performs better as it's RMSE is almost half of the random forest's model.
+
+### Actual and Predicted prices by Town plot:
+
+```{r}
+ggplot(data_test, aes(x = town))+
+  geom_point(aes(y = unstandardised_predictions_lr, alpha = 0.2), color = '#2E5671') + 
+  geom_point(aes(y = predictions_rf, alpha = 0.2), color = '#9AA267' )+
+  geom_point(aes(y = resale_price, alpha = 0.2), color = '#7C2456')+
+  labs(title = 'Actual and Predicted Plots per Town', y = "Price", x ='Town') +
+  scale_y_continuous(labels = label_number())+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  guides(alpha = 'none')
+
+```
+
+Blue is linear regression, green is random forest, and red is the actual sales price.
+
+The better model appears to be the linear regression model.

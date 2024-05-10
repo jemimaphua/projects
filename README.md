@@ -18,3 +18,6 @@ This mini project scrapes the most commonly used 1,000 Danish words. A simple pr
 
 ### kmeans_degrees_salaries.r
 Another project taken from DataCamp to learn how to use k-means cluster analysis to explore the salary of various university degrees.
+
+### Tele_chat_analysis.pdf
+This project analyses my personal telegram chat using bag-of-words. 
